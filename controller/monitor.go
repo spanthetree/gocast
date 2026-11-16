@@ -453,8 +453,8 @@ func (m *MonitorMgr) bgpConfigChanged(old, new c.BgpConfig) bool {
 		return true
 	}
 
-	// Check legacy peer config
-	if old.PeerAS != new.PeerAS || old.PeerIP != new.PeerIP {
+	// Check legacy peer config and the peer_ips shorthand
+	if old.PeerAS != new.PeerAS || old.PeerIP != new.PeerIP || !equalStringSlices(old.PeerIPs, new.PeerIPs) {
 		return true
 	}
 
@@ -478,16 +478,6 @@ func (m *MonitorMgr) bgpConfigChanged(old, new c.BgpConfig) bool {
 		}
 		if old.Peers[i].MultiHop != nil && new.Peers[i].MultiHop != nil {
 			if *old.Peers[i].MultiHop != *new.Peers[i].MultiHop {
-				return true
-			}
-		}
-
-		// Check communities
-		if len(old.Peers[i].Communities) != len(new.Peers[i].Communities) {
-			return true
-		}
-		for j := range old.Peers[i].Communities {
-			if old.Peers[i].Communities[j] != new.Peers[i].Communities[j] {
 				return true
 			}
 		}

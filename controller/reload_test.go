@@ -67,6 +67,14 @@ func TestBgpConfigChanged(t *testing.T) {
 		{PeerIP: "10.10.10.1", PeerAS: 6789, MultiHop: &multiHopTrue},
 	}
 	a.True(mon.bgpConfigChanged(cfg1, cfg8), "MultiHop change should be detected")
+
+	// Test 8: peer_ips shorthand changed
+	cfg9 := cfg1
+	cfg9.PeerIPs = []string{"10.10.10.3"}
+	a.True(mon.bgpConfigChanged(cfg1, cfg9), "peer_ips change should be detected")
+	cfg10 := cfg9
+	cfg10.PeerIPs = []string{"10.10.10.3"}
+	a.False(mon.bgpConfigChanged(cfg9, cfg10), "Identical peer_ips should not be considered changed")
 }
 
 func TestEqualStringSlices(t *testing.T) {
