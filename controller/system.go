@@ -26,7 +26,11 @@ func gateway() (net.IP, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Failed to execute command: %s: %v", cmd, err)
 	}
-	return net.ParseIP(strings.TrimSpace(string(out))), nil
+	ip := net.ParseIP(strings.TrimSpace(string(out)))
+	if ip == nil {
+		return nil, fmt.Errorf("No default route found")
+	}
+	return ip, nil
 }
 
 func via(dest net.IP) (net.IP, error) {

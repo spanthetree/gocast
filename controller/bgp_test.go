@@ -157,6 +157,9 @@ func TestMultiPeerConfig(t *testing.T) {
 
 func TestDefaultGatewayPeer(t *testing.T) {
 	a := assert.New(t)
+	if _, err := gateway(); err != nil {
+		t.Skipf("no default gateway: %v", err)
+	}
 
 	// Test config with no peer_ip - should use default gateway
 	defaultGatewayConfig := config.BgpConfig{
@@ -188,12 +191,6 @@ func TestCommunityMerging(t *testing.T) {
 		origin: 0,
 	}
 
-	peer := &config.PeerConfig{
-		PeerIP: "10.10.10.1",
-		PeerAS: 22222,
-		Communities: []string{"100:100", "200:200"}, // Per-peer
-	}
-
 	route := &Route{
 		Net: &net.IPNet{
 			IP: net.ParseIP("20.30.40.0"),
@@ -202,7 +199,7 @@ func TestCommunityMerging(t *testing.T) {
 		Communities: []string{"5000:5000"}, // Per-route
 	}
 
-	path := ctrl.getApiPath(route, peer)
+	path := ctrl.getApiPath(route)
 
 	// Extract communities from path
 	var commAttr *api.CommunitiesAttribute
@@ -217,17 +214,15 @@ func TestCommunityMerging(t *testing.T) {
 	}
 
 	a.NotNil(commAttr, "Should have communities attribute")
-	a.Equal(5, len(commAttr.Communities), "Should have 5 communities (2 global + 2 peer + 1 route)")
-
 	// Verify community values (converted to uint32)
 	expectedCommunities := []uint32{
 		convertCommunity("1000:1000"), // Global
 		convertCommunity("2000:2000"), // Global
-		convertCommunity("100:100"),   // Per-peer
-		convertCommunity("200:200"),   // Per-peer
 		convertCommunity("5000:5000"), // Per-route
 	}
 	a.Equal(expectedCommunities, commAttr.Communities)
+	// building the path must not modify the global list
+	a.Equal([]string{"1000:1000", "2000:2000"}, ctrl.communities)
 }
 
 func TestMultiHopConfiguration(t *testing.T) {
@@ -241,9 +236,16 @@ func TestMultiHopConfiguration(t *testing.T) {
 		expectMH     bool
 	}{
 		{
-			name:        "default - multihop not enabled",
+			name:        "default eBGP - multihop enabled",
 			localAS:     11111,
 			peerAS:      22222,
+			multiHopPtr: nil,
+			expectMH:    true,
+		},
+		{
+			name:        "default iBGP - multihop not enabled",
+			localAS:     11111,
+			peerAS:      11111,
 			multiHopPtr: nil,
 			expectMH:    false,
 		},
@@ -325,26 +327,22 @@ func TestMultiPeerAnnouncement(t *testing.T) {
 
 	a := assert.New(t)
 
-	// Create two BGP listeners
-	listener1, err := NewBgpListener(22222)
+	// NewBgpListener binds 0.0.0.0:179, so only one can run per test binary.
+	// The second peer (127.0.0.2) is never accepted by the listener; the
+	// route must still reach the first one.
+	listener, err := NewBgpListener(22222)
 	if err != nil {
 		panic(err)
 	}
-	defer listener1.Shutdown()
+	defer listener.Shutdown()
 
-	listener2, err := NewBgpListener(33333)
-	if err != nil {
-		panic(err)
-	}
-	defer listener2.Shutdown()
-
-	// Create controller with two peers
 	multiPeerConfig := config.BgpConfig{
 		LocalAS: 11111,
 		LocalIP: "192.168.1.100",
+		PeerAS:  22222,
 		Peers: []config.PeerConfig{
-			{PeerIP: "127.0.0.1", PeerAS: 22222},
-			{PeerIP: "127.0.0.1", PeerAS: 33333},
+			{PeerIP: "127.0.0.1"},
+			{PeerIP: "127.0.0.2"},
 		},
 		Communities: []string{"100:100"},
 		Origin:      "igp",
@@ -356,19 +354,63 @@ func TestMultiPeerAnnouncement(t *testing.T) {
 	}
 	defer ctrl.Shutdown()
 
-	// Announce a route
 	_, ipnet, _ := net.ParseCIDR("20.30.40.0/24")
 	r := &Route{Net: ipnet}
 	if err := ctrl.Announce(r); err != nil {
 		a.FailNow(err.Error())
 	}
+	a.Equal("20.30.40.0/24", <-listener.recvdPaths)
 
-	// Verify both listeners received the route
-	path1 := <-listener1.recvdPaths
-	a.Equal("20.30.40.0/24", path1)
+	peers, err := ctrl.PeerInfo()
+	a.NoError(err)
+	a.Equal(2, len(peers))
+}
 
-	path2 := <-listener2.recvdPaths
-	a.Equal("20.30.40.0/24", path2)
+func TestPeerNormalization(t *testing.T) {
+	a := assert.New(t)
+	ctrl, err := NewController(config.BgpConfig{
+		LocalAS: 11111,
+		LocalIP: "192.168.1.100",
+		PeerAS:  22222,
+		PeerIP:  "10.10.10.1",
+		PeerIPs: []string{"10.10.10.4", "10.10.10.1"}, // 10.10.10.1 duplicate: dropped
+		Peers: []config.PeerConfig{
+			{PeerIP: "10.10.10.1", PeerAS: 33333}, // duplicate of peer_ip: dropped
+			{PeerIP: "10.10.10.2"},                // inherits peer_as
+			{PeerIP: "10.10.10.3", PeerAS: 44444},
+		},
+	})
+	if err != nil {
+		a.FailNow(err.Error())
+	}
+	defer ctrl.Shutdown()
+	a.Equal([]config.PeerConfig{
+		{PeerIP: "10.10.10.1", PeerAS: 22222},
+		{PeerIP: "10.10.10.4", PeerAS: 22222},
+		{PeerIP: "10.10.10.2", PeerAS: 22222},
+		{PeerIP: "10.10.10.3", PeerAS: 44444},
+	}, ctrl.peers)
+}
+
+func TestInvalidPeerIP(t *testing.T) {
+	_, err := NewController(config.BgpConfig{
+		LocalIP: "192.168.1.100",
+		Peers:   []config.PeerConfig{{PeerIP: "10.0.0.1"}, {PeerIP: "not-an-ip"}},
+	})
+	assert.EqualError(t, err, `Invalid peer ip: "not-an-ip"`)
+}
+
+func TestShutdownWithoutAnnounce(t *testing.T) {
+	ctrl, err := NewController(config.BgpConfig{
+		LocalAS: 11111,
+		LocalIP: "192.168.1.100",
+		PeerAS:  22222,
+		Peers:   []config.PeerConfig{{PeerIP: "10.10.10.1"}, {PeerIP: "10.10.10.2"}},
+	})
+	if err != nil {
+		assert.FailNow(t, err.Error())
+	}
+	assert.NoError(t, ctrl.Shutdown())
 }
 
 func TestBestEffortAnnouncement(t *testing.T) {
@@ -435,13 +477,8 @@ func TestWithdrawMultiplePeers(t *testing.T) {
 	_, ipnet, _ := net.ParseCIDR("20.30.40.0/24")
 	r := &Route{Net: ipnet}
 
-	// Withdraw should iterate through all peers
-	// This will fail because peers aren't established, but it should try both
-	err := ctrl.Withdraw(r)
-	// We expect an error but it should have tried both peers
-	if err != nil {
-		a.Contains(err.Error(), "withdrawal errors")
-	}
+	// Withdrawing a route that was never announced is a no-op
+	a.NoError(ctrl.Withdraw(r))
 }
 
 func TestPeerInfoMultiplePeers(t *testing.T) {

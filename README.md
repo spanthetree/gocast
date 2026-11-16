@@ -24,7 +24,37 @@ GoCast uses [GoBGP](https://github.com/osrg/gobgp) as a library to peer with rem
 Typically you would run GoCast on the same hosts as the service that needs to be monitored.
 Once an application "registers" with GoCast, GoCast then runs the predefined health monitors/checks and if they fail (e.g a service listening on a specific port), the routes are withdrawn thereby taking the node out of service.
 
-GoCast uses a config file to define agent parameters (http addr, consul server addr, timers etc) and BGP parameters (local/peer ASN, peer IP, origin/communnities). See example config.yaml.
+GoCast uses a config file to define agent parameters (http addr, consul server addr, timers etc) and BGP parameters (local/peer ASN, peer IP(s), origin/communnities). See example config.yaml.
+
+By default `bgp.peer_ip` configures a single BGP peer. To peer with more than one BGP speaker at once (eg. redundant route servers/TORs), list them under `bgp.peers`:
+
+```yaml
+bgp:
+  local_as: 65010
+  peer_as: 65000
+  local_ip: 10.1.10.11
+  peers:
+    - peer_ip: 10.1.0.11
+    - peer_ip: 10.1.0.12
+      peer_as: 65001          # optional, defaults to the top-level peer_as
+      multi_hop: false        # optional, defaults to true for eBGP peers
+      md5_env_var: BGP_PASS   # optional MD5 auth password, read from this env var
+      # md5_password: secret  # optional, used if md5_env_var is unset or empty
+```
+
+Peers that need nothing but an IP can use the `peer_ips` shorthand instead:
+
+```yaml
+bgp:
+  peer_as: 65000
+  peer_ips:
+    - 10.1.0.11
+    - 10.1.0.12
+```
+
+GoCast establishes a session to each peer and announces/withdraws routes to all of them together; there's no way to target a route, or a set of communities, at a single peer. `peer_ip` still works for existing single-peer configs. `peer_ip`, `peer_ips` and `peers` can be combined: they are merged into one list in that order, and duplicate IPs are dropped. If `local_ip` is not set it is derived from the route to the first peer.
+
+Note: the `/info` endpoint now returns a JSON array with one entry per configured peer, instead of a single peer object.
 
 ### Registration
 An application can register with the GoCast instance running on the same host using one of the following methods:
